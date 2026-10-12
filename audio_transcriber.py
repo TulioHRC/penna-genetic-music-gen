@@ -1,43 +1,110 @@
 """
 Audio to MIDI Transcriber & Downloader:
 - Faz download direto de links do YouTube (áudio) usando yt-dlp.
-- Transcreve áudio (.mp3, .wav, .m4a, .mp4) para MIDI (.mid) usando detecção de pitch e onsets via Librosa / PrettyMIDI.
+- Converte automaticamente formatos baixados (.webm, .m4a, .mp4, etc.) para WAV via ffmpeg embutido (imageio-ffmpeg).
+- Transcreve áudio para MIDI (.mid) usando detecção de pitch robusta (YIN) e onsets do Librosa.
 """
 
 import os
-import re
+import subprocess
 from typing import Optional
+import soundfile as sf
 import numpy as np
 import librosa
 import pretty_midi
 import yt_dlp
+import imageio_ffmpeg
+
+
+# WAV em qualidade de CD e estéreo: os samples extraídos precisam dos agudos (chimbal)
+# e da imagem estéreo (lead sem voz vem do canal lateral L-R, ver sample_kit.py)
+WAV_SAMPLE_RATE = 44100
+WAV_CHANNELS = 2
+ORIGINAL_AUDIO_EXTENSIONS = (".webm", ".m4a", ".mp3", ".opus", ".ogg", ".mp4", ".flac")
 
 
 class AudioToMidiTranscriber:
     """Extrai notas melódicas e ritmo de um arquivo de áudio para gerar um MIDI limpo."""
 
     @staticmethod
-    def download_youtube_audio(url: str, output_dir: str = "data/reference_midi") -> str:
+    def _convert_to_wav_if_needed(audio_path: str) -> str:
+        """Garante que o áudio seja um arquivo WAV legível pelo librosa/soundfile."""
+        ext = os.path.splitext(audio_path)[1].lower()
+        if ext == ".wav":
+            return audio_path
+
+        wav_path = os.path.splitext(audio_path)[0] + ".wav"
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+
+        print(f"🔄 Convertendo áudio ({ext}) para WAV via FFmpeg...")
+        cmd = [
+            ffmpeg_exe,
+            "-y",
+            "-i", audio_path,
+            "-vn",
+            "-ar", str(WAV_SAMPLE_RATE),
+            "-ac", str(WAV_CHANNELS),
+            wav_path
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if res.returncode == 0 and os.path.exists(wav_path):
+            return wav_path
+        return audio_path
+
+    @staticmethod
+    def best_wav_for(base_path: str) -> Optional[str]:
+        """
+        WAV de uma referência (caminho sem extensão). Se o WAV existente for de uma versão
+        antiga (mono / 22 kHz) e o áudio original ainda existir, converte de novo.
+        """
+        wav_path = base_path + ".wav"
+        originals = [base_path + ext for ext in ORIGINAL_AUDIO_EXTENSIONS if os.path.exists(base_path + ext)]
+        if os.path.exists(wav_path):
+            info = sf.info(wav_path)
+            is_outdated = info.channels < WAV_CHANNELS or info.samplerate < WAV_SAMPLE_RATE
+            if not (is_outdated and originals):
+                return wav_path
+        if originals:
+            return AudioToMidiTranscriber._convert_to_wav_if_needed(originals[0])
+        return None
+
+    @staticmethod
+    def download_youtube_audio(
+        url: str,
+        output_dir: str = "data/reference_midi",
+        cookies_from_browser: Optional[str] = None,
+        cookies_file: Optional[str] = None
+    ) -> str:
+        """
+        Baixa o áudio de um vídeo do YouTube.
+        Se o YouTube pedir login ("confirm you're not a bot"), passe cookies:
+        - cookies_from_browser: "BROWSER[:PERFIL]" (ex.: "firefox" ou "chrome:/caminho/do/perfil")
+        - cookies_file: arquivo cookies.txt no formato Netscape
+        """
         os.makedirs(output_dir, exist_ok=True)
         out_tmpl = os.path.join(output_dir, "%(title).50s.%(ext)s")
         ydl_opts = {
             "format": "bestaudio/best",
             "outtmpl": out_tmpl,
-            "postprocessors": [{
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "192",
-            }] if False else [],  # yt-dlp baixa em m4a/webm nativo e librosa lê direto
             "quiet": False,
-            "no_warnings": True,
+            # YouTube exige resolver um desafio JavaScript; habilita qualquer runtime instalado
+            # (o padrão do yt-dlp é só deno). Os scripts do solver vêm do pacote yt-dlp-ejs.
+            "js_runtimes": {"deno": {}, "node": {}, "bun": {}},
         }
+        if cookies_from_browser:
+            browser, _, profile = cookies_from_browser.partition(":")
+            ydl_opts["cookiesfrombrowser"] = (browser, profile or None, None, None)
+        if cookies_file:
+            ydl_opts["cookiefile"] = cookies_file
 
         print(f"📥 Baixando áudio do YouTube: {url}...")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
-            # Se for vídeo ou outro formato, librosa consegue ler diretamente a faixa de áudio
-            return filename
+
+        # Converte para WAV caso venha em .webm, .opus, .m4a
+        wav_file = AudioToMidiTranscriber._convert_to_wav_if_needed(filename)
+        return wav_file
 
     @staticmethod
     def transcribe_audio_to_midi(
@@ -46,22 +113,23 @@ class AudioToMidiTranscriber:
         fmin: float = librosa.note_to_hz("C2"),
         fmax: float = librosa.note_to_hz("C6"),
         hop_length: int = 512,
-        energy_threshold: float = 0.08
+        energy_threshold: float = 0.05
     ) -> str:
         """
         Transcreve a melodia/linha principal de um áudio para MIDI
-        utilizando algoritmo de tracking de pitch (pYIN / tracking fundamental) do Librosa.
+        utilizando algoritmo de tracking de pitch (YIN) e onsets do Librosa.
         """
-        print(f"🎵 Carregando áudio para transcrição: {audio_path}...")
-        y, sr = librosa.load(audio_path, sr=22050, mono=True)
+        safe_audio_path = AudioToMidiTranscriber._convert_to_wav_if_needed(audio_path)
+
+        print(f"🎵 Carregando áudio para transcrição: {safe_audio_path}...")
+        y, sr = librosa.load(safe_audio_path, sr=22050, mono=True)
 
         if output_midi_path is None:
             base_name = os.path.splitext(os.path.basename(audio_path))[0]
             output_midi_path = os.path.join("data/reference_midi", f"{base_name}.mid")
 
-        print("🔍 Estimando frequências e notas melódicas (pYIN)...")
-        # Estimação de pitch com pYIN (rápido e robusto para melodias/solos/voz)
-        f0, voiced_flag, voiced_probs = librosa.pyin(
+        print("🔍 Estimando frequências e notas melódicas (YIN)...")
+        f0 = librosa.yin(
             y,
             fmin=fmin,
             fmax=fmax,
@@ -79,16 +147,18 @@ class AudioToMidiTranscriber:
         current_pitch = None
         start_time = 0.0
 
-        for t, freq, voiced, v_prob, amp in zip(times, f0, voiced_flag, voiced_probs, rms_norm):
-            if voiced and not np.isnan(freq) and amp > energy_threshold and v_prob > 0.4:
+        for t, freq, amp in zip(times, f0, rms_norm):
+            is_voiced = (amp > energy_threshold) and (not np.isnan(freq)) and (freq >= fmin) and (freq <= fmax)
+
+            if is_voiced:
                 midi_note = int(round(librosa.hz_to_midi(freq)))
                 if current_pitch is None:
                     current_pitch = midi_note
                     start_time = t
-                elif abs(midi_note - current_pitch) >= 1:  # Mudança de nota
-                    if t - start_time >= 0.08:  # Mínimo de 80ms para evitar ruído transitório
+                elif abs(midi_note - current_pitch) >= 1:
+                    if t - start_time >= 0.09:
                         note = pretty_midi.Note(
-                            velocity=int(np.clip(amp * 127, 60, 115)),
+                            velocity=int(np.clip(amp * 127, 65, 115)),
                             pitch=current_pitch,
                             start=float(start_time),
                             end=float(t)
@@ -98,7 +168,7 @@ class AudioToMidiTranscriber:
                     start_time = t
             else:
                 if current_pitch is not None:
-                    if t - start_time >= 0.08:
+                    if t - start_time >= 0.09:
                         note = pretty_midi.Note(
                             velocity=90,
                             pitch=current_pitch,

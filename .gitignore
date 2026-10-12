@@ -220,3 +220,5 @@ __marimo__/
 .streamlit/secrets.toml
 
 *.pdf
+# SoundFonts (arquivos grandes; ver README para download)
+data/soundfonts/*.sf2

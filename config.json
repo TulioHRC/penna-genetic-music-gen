@@ -1,0 +1,30 @@
+{
+  "youtube": [
+    "https://www.youtube.com/watch?v=ZaJ5p5JkN_8"
+  ],
+  "cookies_from_browser": null,
+  "cookies": null,
+  "audio": [],
+  "references": [],
+  "bars": 8,
+  "generations": 200,
+  "population": 100,
+  "mutation_rate": 0.2,
+  "crossover_rate": 0.8,
+  "seed": null,
+  "num_outputs": 1,
+  "style": "rock",
+  "bpm": null,
+  "no_drums": false,
+  "no_bass": false,
+  "no_harmony": false,
+  "output_dir": "output",
+  "w_pitch": 0.3,
+  "w_interval": 0.25,
+  "w_motif": 0.1,
+  "w_resolution": 0.15,
+  "w_register": 0.1,
+  "w_rhythm": 0.1,
+  "timbre": "reference",
+  "soundfont": "data/soundfonts/GeneralUser-GS.sf2"
+}

@@ -24,6 +24,7 @@ class StyleProfile:
     min_pitch: int = 40
     max_pitch: int = 84
     density_notes_per_bar: float = 8.0
+    tempo_bpm: float = 120.0
 
 
 class CorpusAnalyzer:
@@ -36,10 +37,12 @@ class CorpusAnalyzer:
         all_pitches: List[int] = []
         all_durations: List[float] = []
         intervals: List[int] = []
+        tempos: List[float] = []
 
         for path in self.midi_paths:
             try:
                 pm = pretty_midi.PrettyMIDI(path)
+                tempos.append(float(pm.get_tempo_changes()[1][0]))
                 for instrument in pm.instruments:
                     if instrument.is_drum:
                         continue  # Analisamos instrumentos melódicos/harmônicos
@@ -85,7 +88,8 @@ class CorpusAnalyzer:
             avg_pitch=float(np.mean(all_pitches)),
             min_pitch=int(np.min(all_pitches)),
             max_pitch=int(np.max(all_pitches)),
-            density_notes_per_bar=len(all_pitches) / max(1, len(self.midi_paths) * 8)
+            density_notes_per_bar=len(all_pitches) / max(1, len(self.midi_paths) * 8),
+            tempo_bpm=float(np.median(tempos))
         )
 
     def _default_rock_profile(self) -> StyleProfile:
